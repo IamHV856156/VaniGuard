@@ -61,6 +61,7 @@ dependencies {
     ksp(libs.androidx.room.compiler)
     implementation(libs.androidx.compose.material.icons.extended)
     implementation(libs.libphonenumber)
+    implementation(libs.livekit.android)
 
 // Networking
     implementation(libs.okhttp)

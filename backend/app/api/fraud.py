@@ -1,3 +1,4 @@
+
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
@@ -126,24 +127,43 @@ def start_call_session():
 @router.post("/sessions/{session_id}/segments")
 async def upload_call_segment(
     session_id: str,
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    chunk_id: str | None = Form(default=None),
+    call_offset_ms: int | None = Form(default=None)
 ):
     try:
         audio_bytes = await file.read()
 
+        if not audio_bytes:
+            raise HTTPException(
+                status_code=422,
+                detail="Audio segment is empty."
+            )
+
         result = add_audio_segment(
             session_id=session_id,
             filename=file.filename or "segment.wav",
-            audio_bytes=audio_bytes
+            audio_bytes=audio_bytes,
+            chunk_id=chunk_id,
+            call_offset_ms=call_offset_ms
         )
 
         return result
 
+    except HTTPException:
+        raise
+
     except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error))
+        raise HTTPException(
+            status_code=422,
+            detail=str(error)
+        )
 
     except RuntimeError as error:
-        raise HTTPException(status_code=503, detail=str(error))
+        raise HTTPException(
+            status_code=503,
+            detail=str(error)
+        )
 
     except Exception:
         raise HTTPException(
@@ -156,15 +176,24 @@ async def upload_call_segment(
 
 
 @router.post("/sessions/{session_id}/finish")
-def end_call_session(session_id: str):
+def complete_call_session(session_id: str):
     try:
         return finish_session(session_id)
 
+    except KeyError:
+        raise HTTPException(
+            status_code=404,
+            detail="Call session not found."
+        )
+
     except ValueError as error:
-        raise HTTPException(status_code=404, detail=str(error))
+        raise HTTPException(
+            status_code=422,
+            detail=str(error)
+        )
 
     except Exception:
         raise HTTPException(
             status_code=500,
-            detail="Unable to finish call session."
+            detail="Call session finalization failed."
         )

@@ -1,9 +1,11 @@
 
 package com.vanigaurd.app
 
+import android.content.Context
 import android.telecom.Call
 import android.telecom.InCallService
 import android.util.Log
+import com.vanigaurd.app.audio.CallAudioRecorder
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -34,7 +36,7 @@ class VaniGuardInCallService : InCallService() {
                 CallUiController.update(call)
 
                 if (state == Call.STATE_ACTIVE) {
-                    CallSessionRuntime.start(call)
+                    CallSessionRuntime.start(this@VaniGuardInCallService, call)
                 }
 
                 if (state == Call.STATE_DISCONNECTED) {
@@ -46,7 +48,10 @@ class VaniGuardInCallService : InCallService() {
                 }
             }
 
-            override fun onDetailsChanged(call: Call, details: Call.Details) {
+            override fun onDetailsChanged(
+                call: Call,
+                details: Call.Details
+            ) {
                 CallUiController.update(call)
                 CallNotificationManager.show(this@VaniGuardInCallService, call)
             }
@@ -56,12 +61,15 @@ class VaniGuardInCallService : InCallService() {
         callbacks[call] = callback
 
         if (call.state == Call.STATE_ACTIVE) {
-            CallSessionRuntime.start(call)
+            CallSessionRuntime.start(this, call)
         }
     }
 
     override fun onCallRemoved(call: Call) {
-        callbacks.remove(call)?.let { call.unregisterCallback(it) }
+        callbacks.remove(call)?.let {
+            call.unregisterCallback(it)
+        }
+
         CallSessionRuntime.finish(call)
         CallUiController.detach(call)
 
@@ -84,42 +92,118 @@ class VaniGuardInCallService : InCallService() {
 }
 
 private object CallSessionRuntime {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val scope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private class Tracker {
-        @Volatile var sessionId: String? = null
-        @Volatile var ended: Boolean = false
-        @Volatile var finishStarted: Boolean = false
+        @Volatile
+        var sessionId: String? = null
+
+        @Volatile
+        var ended: Boolean = false
+
+        @Volatile
+        var finishStarted: Boolean = false
+
         var startJob: kotlinx.coroutines.Job? = null
+
+        var recorder: CallAudioRecorder? = null
     }
 
     private val trackers = ConcurrentHashMap<Call, Tracker>()
 
-    fun start(call: Call) {
-        val tracker = trackers.computeIfAbsent(call) { Tracker() }
+    fun start(context: Context, call: Call) {
+        val tracker = trackers.computeIfAbsent(call) {
+            Tracker()
+        }
 
         synchronized(tracker) {
-            if (tracker.startJob != null || tracker.sessionId != null || tracker.ended) {
+            if (
+                tracker.startJob != null ||
+                tracker.sessionId != null ||
+                tracker.ended
+            ) {
                 return
             }
+
+            Log.d(TAG, "Starting backend session creation.")
 
             tracker.startJob = scope.launch {
                 try {
                     val session = LiveAudioApi.createSession()
 
-                    val shouldFinish: Boolean
+                    var shouldFinish = false
+
                     synchronized(tracker) {
                         tracker.sessionId = session.sessionId
                         shouldFinish = tracker.ended
+
+                        if (!shouldFinish) {
+                            val audioRecorder = CallAudioRecorder(
+                                context = context.applicationContext,
+                                sessionId = session.sessionId,
+                                onAnalysis = { result ->
+                                    val analysis = result.analysis
+
+                                    Log.i(
+                                        TAG,
+                                        "Live call analysis: " +
+                                                "prediction=${analysis.prediction}, " +
+                                                "risk=${analysis.riskLevel}, " +
+                                                "score=${analysis.fraudScore}"
+                                    )
+
+                                    if (
+                                        analysis.riskLevel.equals(
+                                            "HIGH",
+                                            ignoreCase = true
+                                        )
+                                    ) {
+                                        Log.w(
+                                            TAG,
+                                            "HIGH FRAUD RISK DETECTED DURING CALL"
+                                        )
+                                    }
+                                },
+                                onStatus = { message ->
+                                    Log.d(TAG, "Recorder: $message")
+                                }
+                            )
+
+                            tracker.recorder = audioRecorder
+
+                            if (audioRecorder.start()) {
+                                Log.i(
+                                    TAG,
+                                    "Automatic call audio capture started. " +
+                                            "Session=${session.sessionId}"
+                                )
+                            } else {
+                                Log.e(
+                                    TAG,
+                                    "Automatic audio capture could not start. " +
+                                            "Session=${session.sessionId}"
+                                )
+                            }
+                        }
                     }
 
-                    Log.d(TAG, "Automatic call session created.")
+                    Log.d(
+                        TAG,
+                        "Backend session created: ${session.sessionId}"
+                    )
 
                     if (shouldFinish) {
+                        Log.d(
+                            TAG,
+                            "Call already ended. Finalizing session."
+                        )
                         finishTracker(call, tracker)
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Unable to create call session", e)
+
+                } catch (error: Exception) {
+                    Log.e(TAG, "Unable to create call session", error)
                     trackers.remove(call, tracker)
                 }
             }
@@ -127,33 +211,91 @@ private object CallSessionRuntime {
     }
 
     fun finish(call: Call) {
-        val tracker = trackers[call] ?: return
+        val tracker = trackers[call]
+
+        if (tracker == null) {
+            Log.w(TAG, "Finish requested, but no session tracker exists.")
+            return
+        }
+
         synchronized(tracker) {
             tracker.ended = true
         }
+
+        Log.d(TAG, "Call ended. Recorder shutdown requested.")
+
         finishTracker(call, tracker)
     }
 
-    private fun finishTracker(call: Call, tracker: Tracker) {
+    private fun finishTracker(
+        call: Call,
+        tracker: Tracker
+    ) {
         val sessionId: String
 
         synchronized(tracker) {
-            if (!tracker.ended || tracker.finishStarted) return
-            sessionId = tracker.sessionId ?: return
+            if (!tracker.ended || tracker.finishStarted) {
+                Log.d(
+                    TAG,
+                    "Finish skipped: already running or call not ended."
+                )
+                return
+            }
+
+            sessionId = tracker.sessionId ?: run {
+                Log.d(
+                    TAG,
+                    "Waiting for backend session ID before finalization."
+                )
+                return
+            }
+
             tracker.finishStarted = true
         }
 
         scope.launch {
             try {
-                val report = LiveAudioApi.finishSession(sessionId)
+                // Stop capture and wait for queued audio uploads first.
+                val recorder = synchronized(tracker) {
+                    tracker.recorder
+                }
+
+                if (recorder != null) {
+                    Log.d(TAG, "Stopping recorder and flushing audio.")
+                    recorder.stopAndFlush()
+                }
+
                 Log.d(
                     TAG,
-                    "Call report finalized. Risk=${report.riskLevel}, " +
+                    "Sending finish request for session: $sessionId"
+                )
+
+                val report = LiveAudioApi.finishSession(sessionId)
+
+                Log.i(
+                    TAG,
+                    "Call report finalized successfully. " +
+                            "Session=$sessionId, " +
+                            "Risk=${report.finalAnalysis.riskLevel}, " +
+                            "Score=${report.finalAnalysis.fraudScore}, " +
                             "Segments=${report.segmentCount}"
                 )
-            } catch (e: Exception) {
-                Log.e(TAG, "Unable to finalize call report", e)
-            } finally {
+
+            } catch (error: Exception) {
+                synchronized(tracker) {
+                    tracker.finishStarted = false
+                }
+
+                Log.e(
+                    TAG,
+                    "Unable to finalize call report: $sessionId",
+                    error
+                )
+
+                return@launch
+            }
+
+            synchronized(tracker) {
                 trackers.remove(call, tracker)
             }
         }

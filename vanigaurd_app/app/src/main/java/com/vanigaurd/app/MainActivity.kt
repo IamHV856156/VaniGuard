@@ -2544,10 +2544,10 @@ fun LiveShieldScreen(
 
                                 segmentCount = result.segmentNumber
                                 transcript = result.fullTranscript
-                                prediction = result.prediction
-                                riskLevel = result.riskLevel
-                                fraudScore = result.fraudScore.toFloat()
-                                analysisWarning = result.warning
+                                prediction = result.analysis.prediction
+                                riskLevel = result.analysis.riskLevel
+                                fraudScore = result.analysis.fraudScore.toFloat()
+                                analysisWarning = result.analysis.warning
 
                                 status = "Segment ${result.segmentNumber} analyzed"
                             } catch (e: Exception) {
@@ -2565,10 +2565,10 @@ fun LiveShieldScreen(
                             val report = LiveAudioApi.finishSession(session.sessionId)
 
                             transcript = report.fullTranscript
-                            prediction = report.prediction
-                            riskLevel = report.riskLevel
-                            fraudScore = report.fraudScore.toFloat()
-                            analysisWarning = report.warning
+                            prediction = report.finalAnalysis.prediction
+                            riskLevel = report.finalAnalysis.riskLevel
+                            fraudScore = report.finalAnalysis.fraudScore.toFloat()
+                            analysisWarning = report.finalAnalysis.warning
                             segmentCount = report.segmentCount
 
                             finalReportReady = true
@@ -2652,7 +2652,7 @@ fun LiveShieldScreen(
                             chunkPosition = 0
 
                             val wavBytes =
-                                LiveAudioApi.pcmToWav(completedChunk)
+                                LiveAudioApi.pcmToWav(shortArrayToPcmBytes(completedChunk))
 
                             try {
                                 kotlinx.coroutines.runBlocking {
@@ -2667,7 +2667,7 @@ fun LiveShieldScreen(
                     // Preserve the final partial segment when monitoring stops.
                     if (chunkPosition > 0) {
                         val finalChunk = chunk.copyOf(chunkPosition)
-                        val wavBytes = LiveAudioApi.pcmToWav(finalChunk)
+                        val wavBytes = LiveAudioApi.pcmToWav(shortArrayToPcmBytes(finalChunk))
 
                         try {
                             kotlinx.coroutines.runBlocking {
@@ -3144,4 +3144,15 @@ fun LiveShieldScreen(
 
         Spacer(Modifier.height(20.dp))
     }
+}
+private fun shortArrayToPcmBytes(samples: ShortArray): ByteArray {
+    val bytes = ByteArray(samples.size * 2)
+
+    for (i in samples.indices) {
+        val sample = samples[i].toInt()
+        bytes[i * 2] = (sample and 0xFF).toByte()
+        bytes[i * 2 + 1] = ((sample shr 8) and 0xFF).toByte()
+    }
+
+    return bytes
 }
